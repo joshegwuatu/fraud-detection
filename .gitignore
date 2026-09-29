@@ -26,5 +26,3 @@ desktop.ini
 Thumbs.db
 .DS_Store
 
-# Local dataset
-data/nova_pay_combined.csv
