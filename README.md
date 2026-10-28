@@ -10,10 +10,25 @@ This project aims to make Nova's transaction security stronger by detecting frau
 fraud-detection/
 ├── data/
 │   └── nova_pay_combined.csv   # raw transaction dataset
+├── models/
+│   └── fraud_model.joblib      # saved champion model (created by the notebook)
 ├── notebook/
-│   └── 01_EDA.ipynb            # exploratory data analysis & initial cleaning
+│   └── 01_EDA.ipynb            # EDA, cleaning, feature engineering, models, SHAP
+├── src/
+│   └── app.py                  # FastAPI app that serves the champion model
+├── requirements.txt
 └── README.md
 ```
+
+## Setup
+
+```bash
+python -m venv fraud-venv
+fraud-venv\Scripts\activate        # Windows
+pip install -r requirements.txt
+```
+
+The pinned versions in `requirements.txt` support Python 3.7, which is the version `fraud-venv` uses.
 
 ## Dataset
 
@@ -70,13 +85,83 @@ A value-count audit of every text column, plus a spell-check pass with `pyspellc
 - **Median imputation** for `amount_usd`, `fee` and `device_trust_score`.
 - **Filled with `'Unknown'`:** `ip_address`, `ip_country` and `kyc_tier`.
 
+## Fraud Detection API (`src/app.py`)
+
+A FastAPI app serves the champion model (tuned XGBoost). It cleans each incoming transaction the same way as the notebook, scores it, and returns the top 3 SHAP reasons.
+
+**1. Create the model file.** Run all cells in `notebook/01_EDA.ipynb`. The "Save the Champion Model" cell writes `models/fraud_model.joblib`.
+
+**2. Start the API** from the project root:
+
+```bash
+fraud-venv\Scripts\activate
+uvicorn src.app:app --reload
+```
+
+**3. Try it.** Open http://127.0.0.1:8000/docs for an interactive page where you can send test requests.
+
+| Endpoint | Method | What it does |
+|---|---|---|
+| `/health` | GET | Checks that the API is running and shows the model name and threshold |
+| `/predict` | POST | Scores one transaction |
+| `/predict/batch` | POST | Scores a list of up to 1,000 transactions |
+
+Example request to `/predict`:
+
+```json
+{
+  "transaction_id": "54f00f78-94aa-4a08-bf6b-12877aa47186",
+  "timestamp": "2025-11-26T07:09:56+00:00",
+  "home_country": "CA",
+  "source_currency": "CAD",
+  "dest_currency": "NGN",
+  "channel": "web",
+  "amount_src": 537.17,
+  "amount_usd": 397.51,
+  "fee": 8.86,
+  "exchange_rate_src_to_dest": 822.22,
+  "new_device": false,
+  "ip_country": "UK",
+  "location_mismatch": true,
+  "ip_risk_score": 0.891,
+  "kyc_tier": "low",
+  "account_age_days": 9,
+  "device_trust_score": 0.173,
+  "chargeback_history_count": 2,
+  "risk_score_internal": 0.73,
+  "txn_velocity_1h": 3,
+  "txn_velocity_24h": 6,
+  "corridor_risk": 0.0
+}
+```
+
+The response has the fraud probability, the decision (`is_fraud` is true when the probability is 0.5 or higher), and the top 3 reasons:
+
+```json
+{
+  "transaction_id": "54f00f78-94aa-4a08-bf6b-12877aa47186",
+  "fraud_probability": 0.9744,
+  "is_fraud": true,
+  "top_reasons": [
+    {"feature": "txn_velocity_1h", "impact": 1.5333},
+    {"feature": "txn_velocity_24h", "impact": 1.0548},
+    {"feature": "ip_risk_score", "impact": 0.3171}
+  ]
+}
+```
+
+`amount_usd`, `fee`, `device_trust_score`, `ip_country` and `kyc_tier` can be left out or sent as `null`. Missing numbers are filled with the training medians, and missing text becomes `unknown`.
+
 ## Next steps
-The following issues have been identified but not yet fixed:
-- [ ] Remove the 200 duplicate rows
-- [ ] Strip whitespace, standardise case, and fix typos in `channel`, `kyc_tier`, `home_country` and `ip_country`, and merge the `NAN` / `nan` strings into `Unknown`
-- [ ] Strip commas from `amount_src` and convert it to a number
-- [ ] Parse `timestamp` to datetime and handle the invalid and missing timestamps
-- [ ] Handle the sentinel and out-of-range values (`fee`, `device_trust_score`, `ip_risk_score`, `txn_velocity_1h`)
+- [x] Remove the 200 duplicate rows
+- [x] Strip whitespace, standardise case, and fix typos in `channel`, `kyc_tier`, `home_country` and `ip_country`, and merge the `NAN` / `nan` strings into `unknown`
+- [x] Strip commas from `amount_src` and convert it to a number
+- [x] Parse `timestamp` to datetime and handle the invalid and missing timestamps
+- [x] Handle the sentinel and out-of-range values (`fee`, `device_trust_score`, `ip_risk_score`, `txn_velocity_1h`)
+- [x] Feature engineering (time features, `fee_percent`, `is_new_account`)
+- [x] Baseline logistic regression, and tuned XGBoost and LightGBM, with class-imbalance handling
+- [x] SHAP explanations for the champion model
+- [x] FastAPI app to serve the champion model
+- [ ] Confirm `risk_score_internal` is not calculated from the fraud outcome (possible label leakage)
 - [ ] Consider adding a missing-value indicator feature, because missingness appears together across columns
-- [ ] Feature engineering (time-of-day, corridor, customer/device aggregates)
-- [ ] Model training with class-imbalance handling, and evaluation (precision/recall, PR-AUC)
+- [ ] Tune the decision threshold based on the cost of missed fraud vs false alarms
